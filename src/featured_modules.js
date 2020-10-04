@@ -28,13 +28,14 @@ const modulePath = path.resolve(Utils.getSavePath(), "_modules");
 
 var appName = Utils.getRootAppName();
 
-module.exports = function(){
-	var masterSha;
+module.exports = async function(){
+	let masterSha;
 
 	if(!Main.getInstance().appConfig.autoDownloadFeaturedModules) return;
 
 	console.log("Fetching featured Glasscord modules for application: " + appName);
-	Utils.httpsGet(URL + "master", options, result => {
+	try{
+		let result = await Utils.httpsGetPromisify(URL + "master", options);
 
 		if(result.statusCode != 200){
 			console.log("[Glasscord Featured Modules] Error while querying GitHub API: status code is " + result.statusCode);
@@ -53,65 +54,63 @@ module.exports = function(){
 			}
 		}
 
-		return Utils.httpsGet(URL + sha, options, result => {
+		result = await Utils.httpsGetPromisify(URL + sha, options);
 
+		if(result.statusCode != 200){
+			console.log("[Glasscord Featured Modules] Error while querying GitHub API: status code is " + result.statusCode);
+			return;
+		}
+
+		let data = JSON.parse(result.data);
+
+		let sha;
+		for(let tree of data.tree){
+			if(tree.path === appName && tree.type === "tree"){
+				sha = tree.sha;
+				break;
+			}
+		}
+
+		if(typeof sha === "undefined")
+			return console.log("[Glasscord Featured Modules] No featured modules available for this app.");
+
+		result = await Utils.httpsGet(URL + sha, options);
+
+		if(result.statusCode != 200){
+			console.log("[Glasscord Featured Modules] Error while querying GitHub API: status code is " + result.statusCode);
+			return;
+		}
+
+		data = JSON.parse(result.data);
+
+		let blobs = {};
+		for(let blob of data.tree){
+			if(blob.type === "blob" && path.extname(blob.path) === ".js")
+				blobs["featured/" + appName + "/" + blob.path] = blob.sha;
+		}
+
+		for(let blob in blobs){ // blobs[blob] is the blob sha
+			const blobBaseName = path.basename(blob);
+			if(fs.existsSync(path.resolve(modulePath, blobBaseName))){
+				const file = fs.readFileSync(path.resolve(modulePath, blobBaseName));
+				const fileHash = Utils.hash("sha1", "blob " + file.length + "\0" + file); // Search: how Git calculates SHA-1 checksums of blobs
+
+				if(blobs[blob] === fileHash)
+					return console.log("[Glasscord Featured Modules] Matching files for " + blob + ".");
+			}
+
+			console.log("[Glasscord Featured Modules] Downloading " + blobBaseName + "...");
+			result = await Utils.httpsGetPromisify(FilePattern.replace("{SHA}", masterSha).replace("{PATH}", blob), options);
 			if(result.statusCode != 200){
-				console.log("[Glasscord Featured Modules] Error while querying GitHub API: status code is " + result.statusCode);
+				console.log("[Glasscord Featured Modules] Error while downloading " + blobBaseName + ": status code is " + result.statusCode);
 				return;
 			}
-
-			let data = JSON.parse(result.data);
-
-			let sha;
-			for(let tree of data.tree){
-				if(tree.path === appName && tree.type === "tree"){
-					sha = tree.sha;
-					break;
-				}
-			}
-
-			if(typeof sha === "undefined")
-				return console.log("[Glasscord Featured Modules] No featured modules available for this app.");
-
-			return Utils.httpsGet(URL + sha, options, result => {
-
-				if(result.statusCode != 200){
-					console.log("[Glasscord Featured Modules] Error while querying GitHub API: status code is " + result.statusCode);
-					return;
-				}
-
-				let data = JSON.parse(result.data);
-
-				let blobs = {};
-				for(let blob of data.tree){
-					if(blob.type === "blob" && path.extname(blob.path) === ".js")
-						blobs["featured/" + appName + "/" + blob.path] = blob.sha;
-				}
-
-				for(let blob in blobs){ // blobs[blob] is the blob sha
-					const blobBaseName = path.basename(blob);
-					if(fs.existsSync(path.resolve(modulePath, blobBaseName))){
-						const file = fs.readFileSync(path.resolve(modulePath, blobBaseName));
-						const fileHash = Utils.hash("sha1", "blob " + file.length + "\0" + file); // Search: how Git calculates SHA-1 checksums of blobs
-
-						if(blobs[blob] === fileHash)
-							return console.log("[Glasscord Featured Modules] Matching files for " + blob + ".");
-					}
-
-					console.log("[Glasscord Featured Modules] Downloading " + blobBaseName + "...");
-					Utils.httpsGet(FilePattern.replace("{SHA}", masterSha).replace("{PATH}", blob), options, result => {
-						if(result.statusCode != 200){
-							console.log("[Glasscord Featured Modules] Error while downloading " + blobBaseName + ": status code is " + result.statusCode);
-							return;
-						}
-						fs.writeFileSync(path.resolve(modulePath, blobBaseName), result.data);
-						Main.getInstance().unloadModule(path.resolve(modulePath, blobBaseName));
-						Main.getInstance().loadModule(path.resolve(modulePath, blobBaseName));
-						console.log("[Glasscord Featured Modules] Downloaded and loaded: " + blobBaseName);
-					});
-				}
-			});
-		});
-	});
-
+			fs.writeFileSync(path.resolve(modulePath, blobBaseName), result.data);
+			Main.getInstance().unloadModule(path.resolve(modulePath, blobBaseName));
+			Main.getInstance().loadModule(path.resolve(modulePath, blobBaseName));
+			console.log("[Glasscord Featured Modules] Downloaded and loaded: " + blobBaseName);
+		}
+	}catch(e){
+		console.error("Failed to download featured modules!");
+	}
 };
